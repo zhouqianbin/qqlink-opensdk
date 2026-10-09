@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/zhouqianbin100-commits/qqlink-go-server-sdk"
+	"github.com/zhouqianbin/qqlink-go-server-sdk"
 )
 
 func main() {
