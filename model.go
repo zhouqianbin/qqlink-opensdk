@@ -1,0 +1,152 @@
+package opensdk
+
+import "encoding/json"
+
+// 本文件是 SDK 的请求/响应模型，与 /open 接口一一对应。
+//
+// 服务端返回统一外壳 { errCode, errMsg, resData }，SDK 已解开外壳，
+// 调用方直接拿到下面的 Res 结构；失败时返回 *APIError。
+
+// ---------- 授权 ----------
+
+// AuthTokenRequest 用授权码换访问令牌。
+// 应用身份由 SDK 通过 X-Open-Key 头携带，无需在参数里传。
+type AuthTokenRequest struct {
+	Code string `json:"code"`
+}
+
+type AuthTokenResult struct {
+	AccessToken  string `json:"accessToken"`  // 访问令牌，有效期 20 分钟
+	ExpiresIn    int    `json:"expiresIn"`    // 剩余有效秒数
+	RefreshToken string `json:"refreshToken"` // 刷新令牌
+	Openid       string `json:"openid"`       // 用户在该应用下的标识
+	Nickname     string `json:"nickname"`     // 昵称快照（授权那一刻）
+	Avatar       string `json:"avatar"`       // 头像快照（授权那一刻）
+}
+
+// AuthRefreshRequest 刷新访问令牌。
+type AuthRefreshRequest struct {
+	RefreshToken string `json:"refreshToken"`
+}
+
+type AuthRefreshResult struct {
+	AccessToken string `json:"accessToken"`
+	ExpiresIn   int    `json:"expiresIn"`
+}
+
+// UserInfoRequest 查询用户信息，返回实时资料。
+type UserInfoRequest struct {
+	AccessToken string `json:"accessToken"`
+}
+
+type UserInfoResult struct {
+	Openid    string `json:"openid"`
+	Nickname  string `json:"nickname"` // 实时昵称
+	Avatar    string `json:"avatar"`   // 实时头像
+	Certified bool   `json:"certified"`
+}
+
+// AuthRevokeRequest 解除授权。
+type AuthRevokeRequest struct {
+	Openid string `json:"openid"`
+}
+
+type AuthRevokeResult struct {
+	Ok bool `json:"ok"`
+}
+
+// ---------- 支付 ----------
+
+// PayCreateRequest 下单，不扣款。
+//
+// 不需要传链路与币种：币种默认 USDT，链路由用户在 App 内确认支付时自己选。
+type PayCreateRequest struct {
+	Openid     string  `json:"openid"`
+	OutOrderNo string  `json:"outOrderNo"` // 你的业务单号，用于幂等
+	Amount     float64 `json:"amount"`
+}
+
+type PayCreateResult struct {
+	OrderNo   string `json:"orderNo"`   // 我方单号
+	OrderInfo string `json:"orderInfo"` // 订单信息，交给网页用于唤起支付
+}
+
+// PayQueryRequest 订单查询，对账兜底。只支持按我方单号查询。
+type PayQueryRequest struct {
+	OrderNo string `json:"orderNo"`
+}
+
+type PayQueryResult struct {
+	OrderNo     string `json:"orderNo"`
+	OutOrderNo  string `json:"outOrderNo"`
+	Status      string `json:"status"`
+	Amount      string `json:"amount"`
+	ChainName   string `json:"chainName"`
+	CompletedAt string `json:"completedAt"`
+}
+
+// ---------- 用户数据 ----------
+
+// FriendListRequest 查询指定用户的好友中同样授权了本应用的部分。
+type FriendListRequest struct {
+	Openid string `json:"openid"`
+}
+
+type FriendListResult struct {
+	List []FriendItem `json:"list"`
+}
+
+type FriendItem struct {
+	Openid   string `json:"openid"`
+	Nickname string `json:"nickname"`
+	Avatar   string `json:"avatar"`
+}
+
+// ---------- 回调 ----------
+
+// NoticePayload 是我方资金结果回调的请求体。
+// 你的服务端收到回调后应返回 AckResponse。
+type NoticePayload struct {
+	OrderNo    string `json:"orderNo"`    // 我方单号
+	OutOrderNo string `json:"outOrderNo"` // 你的业务单号
+	Status     string `json:"status"`     // 订单状态
+	ChainName  string `json:"chainName"`  // 链路
+	Amount     string `json:"amount"`
+	Timestamp  string `json:"timestamp"`
+	Nonce      string `json:"nonce"`
+}
+
+// AckResponse 是回调必须返回的确认结构。
+// 只有 Success 为 true 才算 ack 成功，否则我方会重投。
+type AckResponse struct {
+	Success bool `json:"success"`
+}
+
+// 回调请求头名称，供调用方校验签名时取值。
+const (
+	HeaderOpenKey   = "X-Open-Key"
+	HeaderSignature = "X-Signature"
+	HeaderNonce     = "X-Nonce"
+	HeaderTimestamp = "X-Timestamp"
+)
+
+// NoticeRaw 是回调的原始请求内容，供验签使用。
+//
+// Body 必须是**未经改动的原始字节**：验签会从中解析出各字段做拼接，
+// 若你自行改写或重新序列化 body，字段值可能与签名时不一致，验签会失败。
+type NoticeRaw struct {
+	Body      []byte
+	AppKey    string
+	Signature string
+	Nonce     string
+	Timestamp string
+}
+
+// 便于调用方直接反序列化回调 body。
+func (r NoticeRaw) Payload() (*NoticePayload, error) {
+	p := &NoticePayload{}
+	if err := json.Unmarshal(r.Body, p); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
