@@ -10,7 +10,7 @@
 ## 安装
 
 ```
-go get github.com/zhouqianbin/qqlink-go-server-sdk
+go get github.com/zhouqianbin/qqlink-opensdk
 ```
 
 ## 快速开始
@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/zhouqianbin/qqlink-go-server-sdk"
+	"github.com/zhouqianbin/qqlink-opensdk"
 )
 
 func main() {
