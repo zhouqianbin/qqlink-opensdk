@@ -33,13 +33,13 @@ func main() {
 	order, err := client.PayCreate(ctx, opensdk.PayCreateRequest{
 		Openid:     token.Openid,
 		OutOrderNo: "YOUR-ORDER-001", // 你的业务单号，用于幂等
-		Amount:     10.00,
+		Amount:     "10.50000000", // 字符串，最多 8 位小数
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
 	// order.OrderInfo 交给网页，由网页通过桥接唤起 QQLink App 的支付确认框
-	fmt.Printf("orderNo=%s\n", order.OrderNo)
+	fmt.Printf("orderNo=%s amount=%s\n", order.OrderNo, order.Amount)
 
 	// 3. 查询订单（对账兜底）
 	query, err := client.PayQuery(ctx, opensdk.PayQueryRequest{OrderNo: order.OrderNo})

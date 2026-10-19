@@ -31,19 +31,26 @@ func structToParams(in any) map[string]string {
 
 // verifyNoticeSignature 按回调口径校验签名。
 //
-// 与请求签名口径**不同**，回调是按固定字段顺序拼接：
+// 与请求签名口径**不同**：分隔符为 "|"，首段是 noticeType，
+// 之后是 appKey 与按类型固定的字段。支付结果为：
 //
-//	appKey&orderNo&outOrderNo&status&amount&timestamp&nonce
+//	payment|appKey|orderNo|outOrderNo|status|amount|timestamp|nonce
 //
-// 因此这里必须从**已解析的 payload**取字段，而不是复用请求签名的参数表。
-func verifyNoticeSignature(secret, appKey, nonce string, body []byte, signature string) bool {
+// 字段从解析后的 data 段取，而不是复用请求签名的参数表；
+// nonce 取 body 里的 data.nonce，与签名串末尾一致。
+func verifyNoticeSignature(secret, appKey string, body []byte, signature string) bool {
 	payload := &NoticePayload{}
 	if err := json.Unmarshal(body, payload); err != nil {
 		return false
 	}
-	base := fmt.Sprintf("%s&%s&%s&%s&%s&%s&%s",
-		appKey, payload.OrderNo, payload.OutOrderNo, payload.Status,
-		payload.Amount, payload.Timestamp, nonce)
+	fields, err := payload.noticeFields()
+	if err != nil {
+		return false
+	}
+	base := payload.NoticeType + "|" + appKey
+	for _, f := range fields {
+		base += "|" + f
+	}
 
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(base))

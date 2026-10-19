@@ -113,7 +113,26 @@ if err != nil {
 
 ## 接收回调
 
-支付成功后，QQLink 会 `POST` 到你的 `notice_url`，请求体见 `NoticePayload`。
+支付成功后，QQLink 会 `POST` 到你的 `notice_url`。回调分两层：顶层是 `noticeType`，业务字段放在 `data` 里，结构随类型不同。目前只有 `payment`：
+
+**你的服务端必须返回**：
+
+```json
+{
+  "noticeType": "payment",
+  "data": {
+    "orderNo": "O1837...",
+    "outOrderNo": "YOUR-ORDER-001",
+    "status": "success",
+    "chainName": "TRC20",
+    "amount": "10.50000000",
+    "timestamp": "1760851231",
+    "nonce": "a1b2c3d4e5f60718"
+  }
+}
+```
+
+`data` 用 `NoticePayload.Payment()` 取；金额是固定 8 位小数的字符串。
 
 **你的服务端必须返回**：
 
@@ -121,7 +140,7 @@ if err != nil {
 { "success": true }
 ```
 
-不返回或返回 `success` 非 `true`，都会被判为未确认并**重投**。请按 `OrderNo` 做幂等。
+不返回或返回 `success` 非 `true`，都会被判为未确认并**重投**。请按 `orderNo` 做幂等。
 
 ### 校验回调签名
 
@@ -144,14 +163,24 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 验签通过后再反序列化处理
-	payload, _ := (&opensdk.NoticeRaw{Body: body}).Payload()
-	_ = payload
+	payload, _ := opensdk.NoticeRaw{Body: body}.Payload()
+	switch payload.NoticeType {
+	case opensdk.NoticeTypePayment:
+		notice, err := payload.Payment()
+		if err == nil {
+			_ = notice.OrderNo // 按 orderNo 处理你的业务
+		}
+	}
 
 	_ = json.NewEncoder(w).Encode(opensdk.AckResponse{Success: true})
 }
 ```
 
 > 回调的签名口径与请求签名**不同**，SDK 已分别实现，不要混用。
+>
+> 回调签名串：`{noticeType}|{appKey}|{按类型固定顺序的字段}`，支付结果为
+> `payment|{appKey}|{orderNo}|{outOrderNo}|{status}|{amount}|{timestamp}|{nonce}`。
+> 金额使用与回调体完全一致的 8 位小数字符串。
 
 ---
 
@@ -176,3 +205,5 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 ## 版本
 
 当前为 `v0.x`，接口仍在演进，可能存在不兼容变更。稳定后会发布 `v1.0.0`。
+
+本次不兼容变更：回调体改为 `{noticeType, data}` 两层；回调签名改用 `|` 分隔并以 `noticeType` 开头；`PayCreate` 的金额改为字符串。

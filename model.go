@@ -1,6 +1,9 @@
 package opensdk
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // 本文件是 SDK 的请求/响应模型，与 /open 接口一一对应。
 //
@@ -60,14 +63,16 @@ type AuthRevokeResult struct {
 // PayCreateRequest 下单，不扣款。
 //
 // 不需要传链路与币种：币种默认 USDT，链路由用户在 App 内确认支付时自己选。
+// 金额为字符串，最多 8 位小数，例如 "10.50"；用字符串避免浮点误差。
 type PayCreateRequest struct {
-	Openid     string  `json:"openid"`
-	OutOrderNo string  `json:"outOrderNo"` // 你的业务单号，用于幂等
-	Amount     float64 `json:"amount"`
+	Openid     string `json:"openid"`
+	OutOrderNo string `json:"outOrderNo"` // 你的业务单号，用于幂等
+	Amount     string `json:"amount"`     // 金额，最多 8 位小数
 }
 
 type PayCreateResult struct {
 	OrderNo   string `json:"orderNo"`   // 我方单号
+	Amount    string `json:"amount"`    // 订单金额，8 位小数
 	OrderInfo string `json:"orderInfo"` // 订单信息，交给网页用于唤起支付
 }
 
@@ -105,15 +110,49 @@ type FriendItem struct {
 // ---------- 回调 ----------
 
 // NoticePayload 是我方资金结果回调的请求体。
+//
+// 回调分两层：顶层只有 noticeType 与 data，data 的结构随 noticeType 变化。
 // 你的服务端收到回调后应返回 AckResponse。
 type NoticePayload struct {
+	NoticeType string          `json:"noticeType"` // 通知类型：payment
+	Data       json.RawMessage `json:"data"`       // 按 noticeType 对应的结构
+}
+
+// NoticeTypePayment 是支付结果回调。
+const NoticeTypePayment = "payment"
+
+// PaymentNotice 是支付结果回调的 data 段。
+// Amount 固定 8 位小数，例如 "10.00000000"。
+type PaymentNotice struct {
 	OrderNo    string `json:"orderNo"`    // 我方单号
 	OutOrderNo string `json:"outOrderNo"` // 你的业务单号
-	Status     string `json:"status"`     // 订单状态
+	Status     string `json:"status"`     // 订单状态：success
 	ChainName  string `json:"chainName"`  // 链路
-	Amount     string `json:"amount"`
+	Amount     string `json:"amount"`     // 金额，8 位小数
 	Timestamp  string `json:"timestamp"`
 	Nonce      string `json:"nonce"`
+}
+
+// Payment 取出支付回调的 data；通知类型不是 payment 时返回错误。
+func (p *NoticePayload) Payment() (*PaymentNotice, error) {
+	if p.NoticeType != NoticeTypePayment {
+		return nil, fmt.Errorf("opensdk: 未知通知类型 %q", p.NoticeType)
+	}
+	out := &PaymentNotice{}
+	if err := json.Unmarshal(p.Data, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// noticeFields 返回参与回调签名的字段，timestamp、nonce 固定在末尾两位。
+// 新增通知类型时在这里加分支（与请求端口径无关，勿复用 Sign）。
+func (p *NoticePayload) noticeFields() ([]string, error) {
+	n, err := p.Payment()
+	if err != nil {
+		return nil, err
+	}
+	return []string{n.OrderNo, n.OutOrderNo, n.Status, n.Amount, n.Timestamp, n.Nonce}, nil
 }
 
 // AckResponse 是回调必须返回的确认结构。
@@ -122,7 +161,7 @@ type AckResponse struct {
 	Success bool `json:"success"`
 }
 
-// 回调请求头名称，供调用方校验签名时取值。
+// 回调请求头名称，供调用方取值（与 body 内字段同值，验签以 body 为准）。
 const (
 	HeaderOpenKey   = "X-Open-Key"
 	HeaderSignature = "X-Signature"
@@ -132,7 +171,7 @@ const (
 
 // NoticeRaw 是回调的原始请求内容，供验签使用。
 //
-// Body 必须是**未经改动的原始字节**：验签会从中解析出各字段做拼接，
+// Body 必须是**未经改动的原始字节**：验签会从中解析出 noticeType 与 data 各字段做拼接，
 // 若你自行改写或重新序列化 body，字段值可能与签名时不一致，验签会失败。
 type NoticeRaw struct {
 	Body      []byte

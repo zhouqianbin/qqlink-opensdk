@@ -205,10 +205,10 @@ func Sign(appSecret string, params map[string]string, appKey, nonce string) stri
 
 // VerifyNotice 校验回调签名，供你的服务端在收到我方通知时使用。
 //
-// 传原始 body 字节即可，SDK 会自行解析字段后按回调口径拼接。
+// 传原始 body 字节即可，SDK 会解析 noticeType 与 data 后按回调口径拼接。
 // 回调签名串与请求签名口径不同，见 verifyNoticeSignature。
 func (c *Client) VerifyNotice(raw NoticeRaw) bool {
-	return verifyNoticeSignature(c.cfg.AppSecret, c.cfg.AppKey, raw.Nonce, raw.Body, raw.Signature)
+	return verifyNoticeSignature(c.cfg.AppSecret, c.cfg.AppKey, raw.Body, raw.Signature)
 }
 
 func newNonce() (string, error) {
