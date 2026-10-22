@@ -74,7 +74,10 @@ func main() {
 | `AuthRevoke` | 解除授权 |
 | `PayCreate` | 下单（**不扣款**） |
 | `PayQuery` | 订单查询（对账兜底） |
+| `PayRefund` | 发起退款（部分/多次，用户免确认） |
+| `PayRefundQuery` | 按退款单号查询退款 |
 | `FriendList` | 查询用户好友（仅返回同样授权了你应用的部分） |
+| `InviteCode` | 按 openid 查询用户邀请码 |
 
 ### 错误处理
 
@@ -183,6 +186,42 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 > 金额使用与回调体完全一致的 8 位小数字符串。
 
 ---
+
+## 退款
+
+退款由**你的服务端**发起，`PayRefund`，用户无需确认；资金从你的应用结算户按原支付链、原币种退回付款用户。一个订单可以多次部分退款，累计退款不能超过订单金额。
+
+- `outRefundNo` 是幂等键：同一退款单号重复提交返回第一次的结果。
+- 结算户余额不足时接口返回错误码 `30006`（应用账户余额不足），退款记录落为 `failed`，换新的 `outRefundNo` 重试。
+- 成功和失败都会回调，`noticeType` 为 `refund`：
+
+```json
+{
+  "noticeType": "refund",
+  "data": {
+    "orderNo": "O1837...",
+    "outOrderNo": "YOUR-ORDER-001",
+    "refundNo": "R1837...",
+    "outRefundNo": "RF-0001",
+    "outItemNo": "ITEM-03",
+    "status": "success",
+    "chainName": "TRC20",
+    "amount": "1.50000000",
+    "refundedAmount": "3.50000000",
+    "orderAmount": "10.00000000",
+    "reason": "用户申请部分退款",
+    "errorMsg": "",
+    "timestamp": "1760851231",
+    "nonce": "a1b2c3d4e5f60718"
+  }
+}
+```
+
+验签与支付回调同一套流程，SDK 按 `noticeType` 自动选择签名串；取 data 用 `payload.Refund()`。回调签名串：
+
+`refund|{appKey}|{orderNo}|{outOrderNo}|{refundNo}|{outRefundNo}|{outItemNo}|{status}|{amount}|{timestamp}|{nonce}`
+
+请按 `refundNo`（或 `outRefundNo`）幂等处理。
 
 ## 用户身份：openid
 

@@ -90,10 +90,28 @@ func (c *Client) PayQuery(ctx context.Context, in PayQueryRequest) (*PayQueryRes
 	return out, c.call(ctx, "/open/pay/query", in, out)
 }
 
+// PayRefund 发起退款。
+func (c *Client) PayRefund(ctx context.Context, in PayRefundRequest) (*PayRefundResult, error) {
+	out := &PayRefundResult{}
+	return out, c.call(ctx, "/open/pay/refund", in, out)
+}
+
+// PayRefundQuery 查询退款。
+func (c *Client) PayRefundQuery(ctx context.Context, in PayRefundQueryRequest) (*PayRefundQueryResult, error) {
+	out := &PayRefundQueryResult{}
+	return out, c.call(ctx, "/open/pay/refundQuery", in, out)
+}
+
 // FriendList 查询用户好友中同样授权了本应用的部分。
 func (c *Client) FriendList(ctx context.Context, in FriendListRequest) (*FriendListResult, error) {
 	out := &FriendListResult{}
 	return out, c.call(ctx, "/open/user/friends", in, out)
+}
+
+// InviteCode 按 openid 查询用户邀请码。
+func (c *Client) InviteCode(ctx context.Context, in InviteCodeRequest) (*InviteCodeResult, error) {
+	out := &InviteCodeResult{}
+	return out, c.call(ctx, "/open/user/inviteCode", in, out)
 }
 
 // ---------- 内部实现 ----------

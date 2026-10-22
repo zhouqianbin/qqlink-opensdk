@@ -57,3 +57,26 @@ func TestCodeMatchesServer(t *testing.T) {
 		t.Fatal("与服务端向量不一致")
 	}
 }
+
+const refundBody = `{"noticeType":"refund","data":{"orderNo":"O1","outOrderNo":"A1","refundNo":"R1","outRefundNo":"RF1","outItemNo":"I3","status":"success","chainName":"TRC20","amount":"1.50000000","refundedAmount":"3.50000000","orderAmount":"10.00000000","reason":"r","errorMsg":"","timestamp":"1","nonce":"n"}}`
+
+func TestVerifyNoticeRefund(t *testing.T) {
+	sig := signStr("sec", "refund|APP1|O1|A1|R1|RF1|I3|success|1.50000000|1|n")
+	if !verifyNoticeSignature("sec", "APP1", []byte(refundBody), sig) {
+		t.Fatal("合法退款签名应通过")
+	}
+	if verifyNoticeSignature("sec", "APP1", []byte(strings.Replace(refundBody, `"status":"success"`, `"status":"failed"`, 1)), sig) {
+		t.Fatal("篡改状态应失败")
+	}
+	p, err := NoticeRaw{Body: []byte(refundBody)}.Payload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rf, err := p.Refund()
+	if err != nil || rf.RefundedAmount != "3.50000000" {
+		t.Fatalf("got %+v %v", rf, err)
+	}
+	if _, err = p.Payment(); err == nil {
+		t.Fatal("refund 体不应能按 payment 解析")
+	}
+}

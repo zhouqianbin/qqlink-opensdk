@@ -53,7 +53,19 @@ func main() {
 	}
 	fmt.Printf("status=%s chainName=%s\n", query.Status, query.ChainName)
 
-	// 4. 查询好友（仅返回同样授权了本应用的部分）
+	// 4. 部分退款（用户免确认）；成功与失败都会以 noticeType=refund 回调
+	refund, err := client.PayRefund(ctx, opensdk.PayRefundRequest{
+		OutOrderNo:  "YOUR-ORDER-001",
+		OutRefundNo: "YOUR-REFUND-001",
+		Amount:      "1.50000000",
+		Reason:      "部分退款",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("refundNo=%s status=%s refunded=%s\n", refund.RefundNo, refund.Status, refund.RefundedAmount)
+
+	// 5. 查询好友（仅返回同样授权了本应用的部分）
 	friends, err := client.FriendList(ctx, opensdk.FriendListRequest{Openid: token.Openid})
 	if err != nil {
 		log.Fatal(err)
@@ -61,4 +73,11 @@ func main() {
 	for _, f := range friends.List {
 		fmt.Printf("friend openid=%s nickname=%s\n", f.Openid, f.Nickname)
 	}
+
+	// 6. 查询邀请码
+	invite, err := client.InviteCode(ctx, opensdk.InviteCodeRequest{Openid: token.Openid})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("inviteCode=%s\n", invite.InviteCode)
 }

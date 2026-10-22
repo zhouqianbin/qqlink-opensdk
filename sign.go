@@ -35,6 +35,7 @@ func structToParams(in any) map[string]string {
 // 之后是 appKey 与按类型固定的字段。支付结果为：
 //
 //	payment|appKey|orderNo|outOrderNo|status|amount|timestamp|nonce
+//	refund|appKey|orderNo|outOrderNo|refundNo|outRefundNo|outItemNo|status|amount|timestamp|nonce
 //
 // 字段从解析后的 data 段取，而不是复用请求签名的参数表；
 // nonce 取 body 里的 data.nonce，与签名串末尾一致。
