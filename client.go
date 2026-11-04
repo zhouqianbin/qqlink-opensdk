@@ -114,6 +114,24 @@ func (c *Client) InviteCode(ctx context.Context, in InviteCodeRequest) (*InviteC
 	return out, c.call(ctx, "/open/user/inviteCode", in, out)
 }
 
+// WithdrawCreate 发起提现：应用结算户 → openid 对应用户。
+func (c *Client) WithdrawCreate(ctx context.Context, in WithdrawCreateRequest) (*WithdrawResult, error) {
+	out := &WithdrawResult{}
+	return out, c.call(ctx, "/open/withdraw/create", in, out)
+}
+
+// WithdrawQuery 按我方提现单号查询。
+func (c *Client) WithdrawQuery(ctx context.Context, in WithdrawQueryRequest) (*WithdrawResult, error) {
+	out := &WithdrawResult{}
+	return out, c.call(ctx, "/open/withdraw/query", in, out)
+}
+
+// ConsumeSync 批量同步用户消费记录（消费返佣）。
+func (c *Client) ConsumeSync(ctx context.Context, in ConsumeSyncRequest) (*ConsumeSyncResult, error) {
+	out := &ConsumeSyncResult{}
+	return out, c.call(ctx, "/open/consume/sync", in, out)
+}
+
 // ---------- 内部实现 ----------
 
 // response 是我方统一响应外壳。

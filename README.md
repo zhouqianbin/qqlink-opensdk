@@ -78,6 +78,9 @@ func main() {
 | `PayRefundQuery` | 按退款单号查询退款 |
 | `FriendList` | 查询用户好友（仅返回同样授权了你应用的部分） |
 | `InviteCode` | 按 openid 查询用户邀请码 |
+| `WithdrawCreate` | 发起提现（应用结算户 → 用户） |
+| `WithdrawQuery` | 按我方提现单号查询 |
+| `ConsumeSync` | 批量同步用户消费记录（消费返佣） |
 
 ### 错误处理
 
@@ -116,7 +119,7 @@ if err != nil {
 
 ## 接收回调
 
-支付成功后，QQLink 会 `POST` 到你的 `notice_url`。回调分两层：顶层是 `noticeType`，业务字段放在 `data` 里，结构随类型不同。目前只有 `payment`：
+支付 / 退款 / 提现结果，QQLink 会 `POST` 到你的 `notice_url`。回调分两层：顶层是 `noticeType`，业务字段放在 `data` 里，结构随类型不同。支付结果示例：
 
 **你的服务端必须返回**：
 
@@ -173,6 +176,16 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			_ = notice.OrderNo // 按 orderNo 处理你的业务
 		}
+	case opensdk.NoticeTypeRefund:
+		notice, err := payload.Refund()
+		if err == nil {
+			_ = notice.RefundNo
+		}
+	case opensdk.NoticeTypeWithdraw:
+		notice, err := payload.Withdraw()
+		if err == nil {
+			_ = notice.WithdrawNo
+		}
 	}
 
 	_ = json.NewEncoder(w).Encode(opensdk.AckResponse{Success: true})
@@ -222,6 +235,45 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 `refund|{appKey}|{orderNo}|{outOrderNo}|{refundNo}|{outRefundNo}|{outItemNo}|{status}|{amount}|{timestamp}|{nonce}`
 
 请按 `refundNo`（或 `outRefundNo`）幂等处理。
+
+## 提现
+
+提现由**你的服务端**发起，`WithdrawCreate`：从你的应用结算户把金额打到指定 `openid` 对应用户。成功和失败都会回调，`noticeType` 为 `withdraw`。
+
+- `outOrderNo` 是幂等键：同一提现单号重复提交返回第一次的结果。
+- 超出单笔或当日限额时返回错误码 `30008`。
+- 结算户余额不足时记录落为 `failed`，并通过回调通知。
+- 可用 `WithdrawQuery` 按我方 `withdrawNo` 查询兜底。
+
+```json
+{
+  "noticeType": "withdraw",
+  "data": {
+    "withdrawNo": "W1837...",
+    "outOrderNo": "YOUR-WITHDRAW-001",
+    "status": "success",
+    "chainName": "TRC20",
+    "amount": "5.00000000",
+    "errorMsg": "",
+    "timestamp": "1760851231",
+    "nonce": "a1b2c3d4e5f60718"
+  }
+}
+```
+
+取 data 用 `payload.Withdraw()`。回调签名串：
+
+`withdraw|{appKey}|{withdrawNo}|{outOrderNo}|{status}|{chainName}|{amount}|{errorMsg}|{timestamp}|{nonce}`
+
+请按 `withdrawNo`（或 `outOrderNo`）幂等处理。
+
+## 消费同步（返佣）
+
+用 `ConsumeSync` 批量上报用户消费记录，单次最多 50 条。`(openid, outOrderNo)` 是幂等键：同一单号重复提交返回原单，不会重复建单。
+
+- 金额、手续费均为字符串，最多 8 位小数；`fee` 传空串按 0。
+- `consumeTime` 支持 `2006-01-02 15:04:05` 或毫秒时间戳。
+- 返回逐条结果，顺序与请求一致，状态一般为 `pending`。
 
 ## 用户身份：openid
 

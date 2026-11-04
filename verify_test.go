@@ -80,3 +80,26 @@ func TestVerifyNoticeRefund(t *testing.T) {
 		t.Fatal("refund 体不应能按 payment 解析")
 	}
 }
+
+const withdrawBody = `{"noticeType":"withdraw","data":{"withdrawNo":"W1","outOrderNo":"WO1","status":"success","chainName":"TRC20","amount":"5.00000000","errorMsg":"","timestamp":"1","nonce":"n"}}`
+
+func TestVerifyNoticeWithdraw(t *testing.T) {
+	sig := signStr("sec", "withdraw|APP1|W1|WO1|success|TRC20|5.00000000||1|n")
+	if !verifyNoticeSignature("sec", "APP1", []byte(withdrawBody), sig) {
+		t.Fatal("合法提现签名应通过")
+	}
+	if verifyNoticeSignature("sec", "APP1", []byte(strings.Replace(withdrawBody, `"status":"success"`, `"status":"failed"`, 1)), sig) {
+		t.Fatal("篡改状态应失败")
+	}
+	p, err := NoticeRaw{Body: []byte(withdrawBody)}.Payload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := p.Withdraw()
+	if err != nil || w.WithdrawNo != "W1" || w.Amount != "5.00000000" {
+		t.Fatalf("got %+v %v", w, err)
+	}
+	if _, err = p.Refund(); err == nil {
+		t.Fatal("withdraw 体不应能按 refund 解析")
+	}
+}

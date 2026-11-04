@@ -148,6 +148,66 @@ type InviteCodeResult struct {
 	InviteCode string `json:"inviteCode"` // 用户邀请码；用户不存在或未生成时为空串
 }
 
+// ---------- 提现 ----------
+
+// WithdrawCreateRequest 发起提现，应用结算户 → openid 对应用户。
+type WithdrawCreateRequest struct {
+	Openid     string `json:"openid"`     // 收款用户标识，须属于本应用
+	OutOrderNo string `json:"outOrderNo"` // 你的提现单号，用于幂等
+	Amount     string `json:"amount"`     // 金额，最多 8 位小数
+}
+
+// WithdrawQueryRequest 按我方提现单号查询。
+type WithdrawQueryRequest struct {
+	WithdrawNo string `json:"withdrawNo"` // 我方提现单号
+}
+
+// WithdrawResult 是单笔提现的对外结构，发起与查询共用。
+type WithdrawResult struct {
+	WithdrawNo  string `json:"withdrawNo"`  // 我方提现单号
+	OutOrderNo  string `json:"outOrderNo"`  // 你的提现单号
+	Status      string `json:"status"`      // success / failed
+	Amount      string `json:"amount"`      // 提现金额，8 位小数
+	ChainName   string `json:"chainName"`   // 实际链路
+	SucceededAt string `json:"succeededAt"` // 成功时间
+	ErrorMsg    string `json:"errorMsg"`    // 失败原因
+}
+
+// ---------- 消费 ----------
+
+// ConsumeSyncRequest 批量同步用户消费记录。
+// 记录放在 list 字段里：签名按顶层 key 取 value，裸数组的序列化格式随语言而异，对签不可控。
+type ConsumeSyncRequest struct {
+	List []ConsumeSyncItem `json:"list"` // 单次最多 50 条
+}
+
+// ConsumeSyncItem 一条消费记录。
+// (openid, outOrderNo) 是幂等键：同一单号重复提交返回原单，不会重复建单。
+type ConsumeSyncItem struct {
+	Openid      string `json:"openid"`      // 用户在本应用下的标识
+	OutOrderNo  string `json:"outOrderNo"`  // 消费单号
+	Amount      string `json:"amount"`      // 消费金额，最多 8 位小数
+	Fee         string `json:"fee"`         // 手续费，只记录不扣款；传空串按 0
+	ConsumeTime string `json:"consumeTime"` // 2006-01-02 15:04:05 或毫秒时间戳
+	Type        string `json:"type"`        // 消费类型
+	Remark      string `json:"remark"`      // 备注
+
+	// 字段一律不加 omitempty：签名串按 body 解析出的 JSON 拼接，缺字段会改变内容，
+	// 与对方实际发出的 body 对不上。
+}
+
+// ConsumeSyncResult 批量同步的逐条结果，顺序与请求一致。
+type ConsumeSyncResult struct {
+	List []ConsumeSyncItemResult `json:"list"`
+}
+
+type ConsumeSyncItemResult struct {
+	Index      int    `json:"index"`      // 对应请求下标，从 0 开始
+	OutOrderNo string `json:"outOrderNo"` // 消费单号
+	OrderNo    string `json:"orderNo"`    // 我方消费单号
+	Status     string `json:"status"`     // pending 待处理
+}
+
 // ---------- 回调 ----------
 
 // NoticePayload 是我方资金结果回调的请求体。
@@ -161,8 +221,9 @@ type NoticePayload struct {
 
 // 回调通知类型，对应信封顶层 noticeType。
 const (
-	NoticeTypePayment = "payment" // 支付结果
-	NoticeTypeRefund  = "refund"  // 退款终态（成功或失败）
+	NoticeTypePayment  = "payment"  // 支付结果
+	NoticeTypeRefund   = "refund"   // 退款终态（成功或失败）
+	NoticeTypeWithdraw = "withdraw" // 提现终态（成功或失败）
 )
 
 // PaymentNotice 是支付结果回调的 data 段。
@@ -219,6 +280,30 @@ func (p *NoticePayload) Refund() (*RefundNotice, error) {
 	return out, nil
 }
 
+// WithdrawNotice 是提现结果回调的 data 段。
+type WithdrawNotice struct {
+	WithdrawNo string `json:"withdrawNo"` // 我方提现单号
+	OutOrderNo string `json:"outOrderNo"` // 你的提现单号
+	Status     string `json:"status"`     // success / failed
+	ChainName  string `json:"chainName"`  // 实际链路
+	Amount     string `json:"amount"`     // 金额，8 位小数
+	ErrorMsg   string `json:"errorMsg"`   // 失败原因
+	Timestamp  string `json:"timestamp"`
+	Nonce      string `json:"nonce"`
+}
+
+// Withdraw 取出提现回调的 data；通知类型不是 withdraw 时返回错误。
+func (p *NoticePayload) Withdraw() (*WithdrawNotice, error) {
+	if p.NoticeType != NoticeTypeWithdraw {
+		return nil, fmt.Errorf("opensdk: 通知类型不是 withdraw：%q", p.NoticeType)
+	}
+	out := &WithdrawNotice{}
+	if err := json.Unmarshal(p.Data, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // noticeFields 返回参与回调签名的字段，timestamp、nonce 固定在末尾两位。
 // 新增通知类型时在这里加分支（与请求端口径无关，勿复用 Sign）。
 func (p *NoticePayload) noticeFields() ([]string, error) {
@@ -236,6 +321,12 @@ func (p *NoticePayload) noticeFields() ([]string, error) {
 		}
 		return []string{r.OrderNo, r.OutOrderNo, r.RefundNo, r.OutRefundNo, r.OutItemNo,
 			r.Status, r.Amount, r.Timestamp, r.Nonce}, nil
+	case NoticeTypeWithdraw:
+		w, err := p.Withdraw()
+		if err != nil {
+			return nil, err
+		}
+		return []string{w.WithdrawNo, w.OutOrderNo, w.Status, w.ChainName, w.Amount, w.ErrorMsg, w.Timestamp, w.Nonce}, nil
 	}
 	return nil, fmt.Errorf("opensdk: 未知通知类型 %q", p.NoticeType)
 }

@@ -80,4 +80,34 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("inviteCode=%s\n", invite.InviteCode)
+
+	// 7. 发起提现（应用结算户 → 用户）；结果以回调 noticeType=withdraw 为准，也可用 WithdrawQuery 兜底
+	withdraw, err := client.WithdrawCreate(ctx, opensdk.WithdrawCreateRequest{
+		Openid:     token.Openid,
+		OutOrderNo: "YOUR-WITHDRAW-001",
+		Amount:     "5.00000000",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("withdrawNo=%s status=%s\n", withdraw.WithdrawNo, withdraw.Status)
+
+	// 8. 同步消费记录（消费返佣）
+	consume, err := client.ConsumeSync(ctx, opensdk.ConsumeSyncRequest{
+		List: []opensdk.ConsumeSyncItem{{
+			Openid:      token.Openid,
+			OutOrderNo:  "YOUR-CONSUME-001",
+			Amount:      "2.00000000",
+			Fee:         "0",
+			ConsumeTime: "2026-11-04 12:00:00",
+			Type:        "purchase",
+			Remark:      "",
+		}},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, item := range consume.List {
+		fmt.Printf("consume outOrderNo=%s orderNo=%s status=%s\n", item.OutOrderNo, item.OrderNo, item.Status)
+	}
 }
