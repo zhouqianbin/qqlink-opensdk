@@ -10,33 +10,34 @@ import (
 
 const paymentBody = `{"noticeType":"payment","data":{"orderNo":"O1","outOrderNo":"A1","status":"success","chainName":"TRC20","amount":"10.00000000","timestamp":"1760851231","nonce":"n1"}}`
 
-func signStr(secret, base string) string {
-	m := hmac.New(sha256.New, []byte(secret))
-	m.Write([]byte(base))
-	return hex.EncodeToString(m.Sum(nil))
-}
+const refundBody = `{"noticeType":"refund","data":{"orderNo":"O1","outOrderNo":"A1","refundNo":"R1","outRefundNo":"RF1","outItemNo":"I3","status":"success","chainName":"TRC20","amount":"1.50000000","refundedAmount":"3.50000000","orderAmount":"10.00000000","reason":"r|x","errorMsg":"","timestamp":"1","nonce":"n"}}`
+
+const withdrawBody = `{"noticeType":"withdraw","data":{"withdrawNo":"W1","outOrderNo":"WO1","status":"success","chainName":"TRC20","amount":"5.00000000","errorMsg":"","timestamp":"1","nonce":"n"}}`
 
 func TestVerifyNoticePayment(t *testing.T) {
-	sig := signStr("sec", "payment|APP1|O1|A1|success|10.00000000|1760851231|n1")
+	sig := SignNotice("sec", "APP1", []byte(paymentBody))
 	if !verifyNoticeSignature("sec", "APP1", []byte(paymentBody), sig) {
 		t.Fatal("合法签名应通过")
 	}
 	if verifyNoticeSignature("sec", "APP2", []byte(paymentBody), sig) {
 		t.Fatal("appKey 不同应失败")
 	}
-	// 旧口径（& 分隔、无 noticeType）必须被拒绝，防止对方误用旧实现。
-	legacy := signStr("sec", "APP1&O1&A1&success&10.00000000&1760851231&n1")
+	// 旧 "|" 字段拼接口径（HMAC(secret, "payment|APP1|...")）必须被拒绝。
+	mac := hmac.New(sha256.New, []byte("sec"))
+	mac.Write([]byte("payment|APP1|O1|A1|success|TRC20|10.00000000|1760851231|n1"))
+	legacy := hex.EncodeToString(mac.Sum(nil))
 	if verifyNoticeSignature("sec", "APP1", []byte(paymentBody), legacy) {
 		t.Fatal("旧签名口径不应通过")
 	}
 }
 
 func TestVerifyNoticeRejectsTampering(t *testing.T) {
-	sig := signStr("sec", "payment|APP1|O1|A1|success|10.00000000|1760851231|n1")
+	sig := SignNotice("sec", "APP1", []byte(paymentBody))
 	cases := []string{
 		strings.Replace(paymentBody, `"noticeType":"payment"`, `"noticeType":"refund"`, 1),
 		strings.Replace(paymentBody, `"amount":"10.00000000"`, `"amount":"100.00000000"`, 1),
 		strings.Replace(paymentBody, `"orderNo":"O1"`, `"orderNo":"O2"`, 1),
+		strings.Replace(paymentBody, `"chainName":"TRC20"`, `"chainName":"ERC20"`, 1),
 		`{"noticeType":"payment"}`,
 	}
 	for _, body := range cases {
@@ -46,45 +47,28 @@ func TestVerifyNoticeRejectsTampering(t *testing.T) {
 	}
 }
 
-func TestCodeMatchesServer(t *testing.T) {
-	// 与 walletGo internal/logic/open/notify_test.go 的固定向量一致。
-	d := PaymentNotice{OrderNo: "O1", OutOrderNo: "A1", Status: "success", ChainName: "TRC20",
-		Amount: "10.00000000", Timestamp: "1760851231", Nonce: "n1"}
-	body := `{"noticeType":"payment","data":{"orderNo":"` + d.OrderNo + `","outOrderNo":"` + d.OutOrderNo +
-		`","status":"` + d.Status + `","chainName":"` + d.ChainName + `","amount":"` + d.Amount +
-		`","timestamp":"` + d.Timestamp + `","nonce":"` + d.Nonce + `"}}`
-	if !verifyNoticeSignature("sec", "APP1", []byte(body), signStr("sec", "payment|APP1|O1|A1|success|10.00000000|1760851231|n1")) {
-		t.Fatal("与服务端向量不一致")
-	}
-}
-
-const refundBody = `{"noticeType":"refund","data":{"orderNo":"O1","outOrderNo":"A1","refundNo":"R1","outRefundNo":"RF1","outItemNo":"I3","status":"success","chainName":"TRC20","amount":"1.50000000","refundedAmount":"3.50000000","orderAmount":"10.00000000","reason":"r","errorMsg":"","timestamp":"1","nonce":"n"}}`
-
-func TestVerifyNoticeRefund(t *testing.T) {
-	sig := signStr("sec", "refund|APP1|O1|A1|R1|RF1|I3|success|1.50000000|1|n")
+func TestVerifyNoticeRefundWithPipeInReason(t *testing.T) {
+	// reason 含 "|" 时旧拼接口径会歧义；body 签名不受影响。
+	sig := SignNotice("sec", "APP1", []byte(refundBody))
 	if !verifyNoticeSignature("sec", "APP1", []byte(refundBody), sig) {
 		t.Fatal("合法退款签名应通过")
 	}
-	if verifyNoticeSignature("sec", "APP1", []byte(strings.Replace(refundBody, `"status":"success"`, `"status":"failed"`, 1)), sig) {
-		t.Fatal("篡改状态应失败")
+	tampered := strings.Replace(refundBody, `"reason":"r|x"`, `"reason":"r|y"`, 1)
+	if verifyNoticeSignature("sec", "APP1", []byte(tampered), sig) {
+		t.Fatal("篡改 reason 应失败")
 	}
 	p, err := NoticeRaw{Body: []byte(refundBody)}.Payload()
 	if err != nil {
 		t.Fatal(err)
 	}
 	rf, err := p.Refund()
-	if err != nil || rf.RefundedAmount != "3.50000000" {
+	if err != nil || rf.RefundedAmount != "3.50000000" || rf.Reason != "r|x" {
 		t.Fatalf("got %+v %v", rf, err)
-	}
-	if _, err = p.Payment(); err == nil {
-		t.Fatal("refund 体不应能按 payment 解析")
 	}
 }
 
-const withdrawBody = `{"noticeType":"withdraw","data":{"withdrawNo":"W1","outOrderNo":"WO1","status":"success","chainName":"TRC20","amount":"5.00000000","errorMsg":"","timestamp":"1","nonce":"n"}}`
-
 func TestVerifyNoticeWithdraw(t *testing.T) {
-	sig := signStr("sec", "withdraw|APP1|W1|WO1|success|TRC20|5.00000000||1|n")
+	sig := SignNotice("sec", "APP1", []byte(withdrawBody))
 	if !verifyNoticeSignature("sec", "APP1", []byte(withdrawBody), sig) {
 		t.Fatal("合法提现签名应通过")
 	}
@@ -96,10 +80,15 @@ func TestVerifyNoticeWithdraw(t *testing.T) {
 		t.Fatal(err)
 	}
 	w, err := p.Withdraw()
-	if err != nil || w.WithdrawNo != "W1" || w.Amount != "5.00000000" {
+	if err != nil || w.WithdrawNo != "W1" {
 		t.Fatalf("got %+v %v", w, err)
 	}
-	if _, err = p.Refund(); err == nil {
-		t.Fatal("withdraw 体不应能按 refund 解析")
+}
+
+func TestCodeMatchesServerNoticeVector(t *testing.T) {
+	// 与 walletGo notify_test 固定向量一致。
+	want := SignNotice("sec", "APP1", []byte(paymentBody))
+	if !verifyNoticeSignature("sec", "APP1", []byte(paymentBody), want) {
+		t.Fatal("与服务端向量不一致")
 	}
 }

@@ -3,7 +3,10 @@
 用于在**你自己的服务端**调用 QQLink 生态（`/open`）接口的 Go SDK。
 
 > **本 SDK 只应运行在你的服务端。**
-> `app_secret` 绝不能下发到网页或客户端——泄漏即可被用来伪造你的全部请求。
+> `AppSecret` 绝不能下发到网页或客户端。
+> 泄漏后攻击者可伪造你的全部 `/open` 请求，包括**提现、免确认退款、解授权、伪造消费记录**——
+> 可能动用的是**你的应用结算户**，不是用户钱包里需输交易密码才能划走的余额。
+> 请按支付级密钥保管（环境变量/密钥管理，勿入库、勿进日志）；入驻后如支持，请配置服务端 IP 白名单。
 
 ---
 
@@ -28,9 +31,9 @@ import (
 
 func main() {
 	client, err := opensdk.New(opensdk.Config{
-		BaseURL:   "https://api.qqlink.buzz",
-		AppKey:    "oa_xxxxxxxx",   // 入驻时分配的公钥
-		AppSecret: "os_xxxxxxxx",   // 入驻时分配的私钥，仅服务端持有
+		BaseURL:   "https://api.qqlink.buzz", // 必须 https；本地 http 联调需设 InsecureAllowHTTP
+		AppKey:    "oa_xxxxxxxx",             // 入驻时分配的公钥
+		AppSecret: "os_xxxxxxxx",             // 入驻时分配的私钥，仅服务端持有
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -49,6 +52,17 @@ func main() {
 
 签名、nonce、请求头全部由 SDK 处理，你只需填参数。
 
+请求签名对原始 JSON body 做 HMAC-SHA256，待签串为
+`v3\n{method}\n{path}\n{timestamp}\n{nonce}\n{appKey}\n{rawBody}`
+（如 `POST` + `/open/pay/create`）。不要自行改写 body 后再算签。
+
+**时间与时钟（重要）：**
+
+- `timestamp` / 头 `X-Timestamp` 为 **Unix 秒**（自 1970-01-01 00:00:00 **UTC** 起算），与机器显示时区（如东八区）无关；SDK 使用 `time.Now().Unix()` 生成。
+- 服务端按同样的 UTC Unix 秒校验，允许偏差 **±300 秒**。超出则拒绝（时间戳无效或已过期）。
+- **双方主机都应 NTP 对齐到可靠时间源**。协议用的是 UTC 时间戳，但不保证某台机器时钟本身准确；若你方服务器快慢超过约 5 分钟，即使用对了签名算法也会失败。
+- 一般**不需要**向我方拉取服务器时间；先做好 NTP。仅在校时后仍频繁因时间窗失败时，再联系对接人排查。
+
 ---
 
 ## 接入前提
@@ -58,7 +72,7 @@ func main() {
 | 项 | 说明 |
 | --- | --- |
 | `AppKey` | 公钥，对外可见 |
-| `AppSecret` | 私钥，**仅服务端持有** |
+| `AppSecret` | 私钥，**仅服务端持有**；泄漏≈可动结算户资金，见文首说明 |
 | 应用入口地址 | 用户在 QQLink App 内打开你应用时加载的页面 |
 | 通知地址 `notice_url` | 接收资金结果回调的服务端地址 |
 
@@ -111,7 +125,8 @@ if err != nil {
 
 1. **下单不需要传链路与币种**——币种默认 USDT，**链路由用户在 QQLink App 内选**（他有哪条链的余额就用哪条）。你无从得知，也无需指定。
 2. **你拿不到支付结果的同步响应**。**你的订单状态必须以回调为准**（见下）。
-3. **即使 `app_secret` 泄漏，攻击者也无法扣用户的钱**——扣款必须由用户本人在 QQLink App 内输交易密码触发。这是对双方的保护。
+3. **用户钱包扣款仍受交易密码保护**：即便 `AppSecret` 泄漏，攻击者也**不能**单靠接口直接划走用户余额——支付确认必须在 QQLink App 内由用户完成。
+4. **但结算户不受这一保护**：同一把 `AppSecret` 即可发起 `WithdrawCreate` / `PayRefund`（用户免确认）等，泄漏后可能掏空或挪用**应用结算户**。保管与白名单要求见文首。
 
 下单后，把返回的 `orderInfo` 交给你的**网页**，网页会通过桥接唤起 QQLink App 的支付确认框。
 
@@ -150,7 +165,14 @@ if err != nil {
 
 ### 校验回调签名
 
-**必须用原始 body 字节验签**，不要先反序列化再重新序列化：
+**必须用原始 body 字节验签**，不要先反序列化再重新序列化。
+
+**`VerifyNotice` 只验签，不防重放：**
+
+- 通过 = **原始 body** 未被篡改，且签名由持有 `AppSecret` 的一方生成（待签串 `notice\n{appKey}\n{rawBody}`）。
+- **不**校验 `data.timestamp` 是否过期，**不**消费 `nonce`；同一条合法回调再次 POST 时仍可能验签成功。
+- 请求头里的 `X-Nonce` / `X-Timestamp` / `X-Open-Key` 即使填进 `NoticeRaw` 也不参与判断（以 Body + `X-Signature` 为准；appKey 用客户端配置）。
+- 你必须在业务层幂等：支付按 `orderNo`、退款按 `refundNo`（或 `outRefundNo`）、提现按 `withdrawNo`（或 `outOrderNo`）去重后再改状态/入账。平台未收到 `{success:true}` 时会重投，幂等同样必要。
 
 ```go
 func noticeHandler(w http.ResponseWriter, r *http.Request) {
@@ -158,23 +180,20 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 
 	ok := client.VerifyNotice(opensdk.NoticeRaw{
 		Body:      body,
-		AppKey:    r.Header.Get(opensdk.HeaderOpenKey),
 		Signature: r.Header.Get(opensdk.HeaderSignature),
-		Nonce:     r.Header.Get(opensdk.HeaderNonce),
-		Timestamp: r.Header.Get(opensdk.HeaderTimestamp),
 	})
 	if !ok {
 		http.Error(w, "bad signature", http.StatusUnauthorized)
 		return
 	}
 
-	// 验签通过后再反序列化处理
+	// 验签通过后再反序列化；处理业务前先按单号幂等去重
 	payload, _ := opensdk.NoticeRaw{Body: body}.Payload()
 	switch payload.NoticeType {
 	case opensdk.NoticeTypePayment:
 		notice, err := payload.Payment()
 		if err == nil {
-			_ = notice.OrderNo // 按 orderNo 处理你的业务
+			_ = notice.OrderNo // 已处理过则直接 ack，勿重复入账
 		}
 	case opensdk.NoticeTypeRefund:
 		notice, err := payload.Refund()
@@ -192,17 +211,15 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-> 回调的签名口径与请求签名**不同**，SDK 已分别实现，不要混用。
->
-> 回调签名串：`{noticeType}|{appKey}|{按类型固定顺序的字段}`，支付结果为
-> `payment|{appKey}|{orderNo}|{outOrderNo}|{status}|{amount}|{timestamp}|{nonce}`。
-> 金额使用与回调体完全一致的 8 位小数字符串。
+> 回调与请求都签**原始 body 字节**，但前缀不同：请求为
+> `v3\n{method}\n{path}\n{timestamp}\n{nonce}\n{appKey}\n{rawBody}`，
+> 回调为 `notice\n{appKey}\n{rawBody}`（`SignNotice` / `VerifyNotice`）。不要混用，也不要先改写 body 再验签。
 
 ---
 
 ## 退款
 
-退款由**你的服务端**发起，`PayRefund`，用户无需确认；资金从你的应用结算户按原支付链、原币种退回付款用户。一个订单可以多次部分退款，累计退款不能超过订单金额。
+退款由**你的服务端**发起，`PayRefund`，**用户无需确认**；资金从你的应用结算户按原支付链、原币种退回付款用户。一个订单可以多次部分退款，累计退款不能超过订单金额。因此 `AppSecret` 必须按可动用结算资金的密钥级别保管。
 
 - `outRefundNo` 是幂等键：同一退款单号重复提交返回第一次的结果。
 - 结算户余额不足时接口返回错误码 `30006`（应用账户余额不足），退款记录落为 `failed`，换新的 `outRefundNo` 重试。
@@ -230,15 +247,13 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-验签与支付回调同一套流程，SDK 按 `noticeType` 自动选择签名串；取 data 用 `payload.Refund()`。回调签名串：
-
-`refund|{appKey}|{orderNo}|{outOrderNo}|{refundNo}|{outRefundNo}|{outItemNo}|{status}|{amount}|{timestamp}|{nonce}`
+验签与支付回调同一套流程（`VerifyNotice` 对原始 body）；取 data 用 `payload.Refund()`。
 
 请按 `refundNo`（或 `outRefundNo`）幂等处理。
 
 ## 提现
 
-提现由**你的服务端**发起，`WithdrawCreate`：从你的应用结算户把金额打到指定 `openid` 对应用户。成功和失败都会回调，`noticeType` 为 `withdraw`。
+提现由**你的服务端**发起，`WithdrawCreate`：从你的应用结算户把金额打到指定 `openid` 对应用户（**仅需 `AppSecret`，无用户二次确认**）。成功和失败都会回调，`noticeType` 为 `withdraw`。
 
 - `outOrderNo` 是幂等键：同一提现单号重复提交返回第一次的结果。
 - 超出单笔或当日限额时返回错误码 `30008`。
@@ -261,9 +276,7 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-取 data 用 `payload.Withdraw()`。回调签名串：
-
-`withdraw|{appKey}|{withdrawNo}|{outOrderNo}|{status}|{chainName}|{amount}|{errorMsg}|{timestamp}|{nonce}`
+取 data 用 `payload.Withdraw()`；验签仍用原始 body 的 `VerifyNotice`。
 
 请按 `withdrawNo`（或 `outOrderNo`）幂等处理。
 
@@ -297,4 +310,8 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 
 当前为 `v0.x`，接口仍在演进，可能存在不兼容变更。稳定后会发布 `v1.0.0`。
 
-本次不兼容变更：回调体改为 `{noticeType, data}` 两层；回调签名改用 `|` 分隔并以 `noticeType` 开头；`PayCreate` 的金额改为字符串。
+历史不兼容变更：回调体改为 `{noticeType, data}` 两层；`PayCreate` 的金额改为字符串；回调签名现为对原始 body 的 HMAC（见上文）。
+
+请求签名改为对原始 body 做 HMAC，并纳入 method/path（待签串
+`v3\n{method}\n{path}\n{timestamp}\n{nonce}\n{appKey}\n{rawBody}`），校验 ±300s 时间窗。
+回调签名改为对原始 body 做 HMAC（`notice\n{appKey}\n{rawBody}`），不再用 `|` 拼字段。

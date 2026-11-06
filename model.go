@@ -176,7 +176,7 @@ type WithdrawResult struct {
 // ---------- 消费 ----------
 
 // ConsumeSyncRequest 批量同步用户消费记录。
-// 记录放在 list 字段里：签名按顶层 key 取 value，裸数组的序列化格式随语言而异，对签不可控。
+// 记录放在 list 字段里；v2 对整段 JSON body 签名，嵌套结构不再单独格式化。
 type ConsumeSyncRequest struct {
 	List []ConsumeSyncItem `json:"list"` // 单次最多 50 条
 }
@@ -192,8 +192,7 @@ type ConsumeSyncItem struct {
 	Type        string `json:"type"`        // 消费类型
 	Remark      string `json:"remark"`      // 备注
 
-	// 字段一律不加 omitempty：签名串按 body 解析出的 JSON 拼接，缺字段会改变内容，
-	// 与对方实际发出的 body 对不上。
+	// 字段一律不加 omitempty：缺字段会改变 JSON body，从而改变 v2 签名。
 }
 
 // ConsumeSyncResult 批量同步的逐条结果，顺序与请求一致。
@@ -304,33 +303,6 @@ func (p *NoticePayload) Withdraw() (*WithdrawNotice, error) {
 	return out, nil
 }
 
-// noticeFields 返回参与回调签名的字段，timestamp、nonce 固定在末尾两位。
-// 新增通知类型时在这里加分支（与请求端口径无关，勿复用 Sign）。
-func (p *NoticePayload) noticeFields() ([]string, error) {
-	switch p.NoticeType {
-	case NoticeTypePayment:
-		n, err := p.Payment()
-		if err != nil {
-			return nil, err
-		}
-		return []string{n.OrderNo, n.OutOrderNo, n.Status, n.Amount, n.Timestamp, n.Nonce}, nil
-	case NoticeTypeRefund:
-		r, err := p.Refund()
-		if err != nil {
-			return nil, err
-		}
-		return []string{r.OrderNo, r.OutOrderNo, r.RefundNo, r.OutRefundNo, r.OutItemNo,
-			r.Status, r.Amount, r.Timestamp, r.Nonce}, nil
-	case NoticeTypeWithdraw:
-		w, err := p.Withdraw()
-		if err != nil {
-			return nil, err
-		}
-		return []string{w.WithdrawNo, w.OutOrderNo, w.Status, w.ChainName, w.Amount, w.ErrorMsg, w.Timestamp, w.Nonce}, nil
-	}
-	return nil, fmt.Errorf("opensdk: 未知通知类型 %q", p.NoticeType)
-}
-
 // AckResponse 是回调必须返回的确认结构。
 // 只有 Success 为 true 才算 ack 成功，否则我方会重投。
 type AckResponse struct {
@@ -347,8 +319,11 @@ const (
 
 // NoticeRaw 是回调的原始请求内容，供验签使用。
 //
-// Body 必须是**未经改动的原始字节**：验签会从中解析出 noticeType 与 data 各字段做拼接，
-// 若你自行改写或重新序列化 body，字段值可能与签名时不一致，验签会失败。
+// Body 必须是**未经改动的原始字节**：VerifyNotice 对 Body 做 HMAC（SignNotice），
+// 若你自行改写或重新序列化 body，验签会失败。
+//
+// AppKey / Nonce / Timestamp 便于排查或与头字段对照；VerifyNotice 当前只使用 Body 与 Signature
+//（appKey 取自客户端配置）。防重放须自行按业务单号幂等，见 VerifyNotice 文档。
 type NoticeRaw struct {
 	Body      []byte
 	AppKey    string

@@ -10,6 +10,7 @@
 //	result, err := client.AuthToken(ctx, opensdk.AuthTokenRequest{Code: code})
 //
 // 本 SDK 只应运行在**你的服务端**：AppSecret 绝不能下发到网页或客户端。
+// 泄漏后可伪造提现/退款等请求并动用应用结算户，详见 README。
 package opensdk
 import (
 	"bytes"
@@ -23,7 +24,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -33,6 +35,10 @@ type Config struct {
 	AppKey    string        // 应用公钥（AK）
 	AppSecret string        // 应用私钥（SK），仅服务端持有
 	Timeout   time.Duration // 请求超时，默认 10 秒
+
+	// InsecureAllowHTTP 仅用于本地联调：允许 http:// BaseURL。
+	// 生产环境必须使用 https，勿开启。
+	InsecureAllowHTTP bool
 }
 
 // Client 封装 /open 接口的签名与调用。
@@ -41,15 +47,35 @@ type Client struct {
 	http *http.Client
 }
 
+// maxResponseBody 是单次响应体读取上限，防止异常大包撑爆内存。
+const maxResponseBody = 2 << 20 // 2 MiB
+
+// maxErrorBodySnippet 是写入 error 字符串的响应摘要长度。
+const maxErrorBodySnippet = 256
+
 // New 创建客户端。
 func New(cfg Config) (*Client, error) {
 	if cfg.BaseURL == "" || cfg.AppKey == "" || cfg.AppSecret == "" {
 		return nil, errors.New("opensdk: BaseURL/AppKey/AppSecret 均为必填")
 	}
+	u, err := url.Parse(cfg.BaseURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return nil, errors.New("opensdk: BaseURL 非法")
+	}
+	if u.Scheme != "https" && !cfg.InsecureAllowHTTP {
+		return nil, errors.New("opensdk: BaseURL 必须使用 https（本地调试可设 InsecureAllowHTTP）")
+	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
-	return &Client{cfg: cfg, http: &http.Client{Timeout: cfg.Timeout}}, nil
+	// 禁止自动跟随重定向：默认 Client 会把 X-Signature 等自定义头带到 Location，
+	// 若 BaseURL 被劫持或返回跨站 3xx，签名材料可能泄露。
+	return &Client{cfg: cfg, http: &http.Client{
+		Timeout: cfg.Timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return errors.New("opensdk: 拒绝跟随 HTTP 重定向")
+		},
+	}}, nil
 }
 
 // ---------- 对外接口 ----------
@@ -172,26 +198,29 @@ func (c *Client) call(ctx context.Context, path string, in, out any) error {
 	req.Header.Set(HeaderOpenKey, c.cfg.AppKey)
 	req.Header.Set(HeaderTimestamp, timestamp)
 	req.Header.Set(HeaderNonce, nonce)
-	req.Header.Set(HeaderSignature, c.SignParams(in, nonce))
+	req.Header.Set(HeaderSignature, SignBody(c.cfg.AppSecret, body, http.MethodPost, path, c.cfg.AppKey, nonce, timestamp))
 
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody+1))
 	if err != nil {
 		return err
+	}
+	if len(respBody) > maxResponseBody {
+		return fmt.Errorf("opensdk: 响应体超过 %d 字节上限", maxResponseBody)
 	}
 
 	// 签名失败等鉴权错误由中间件直接返回，HTTP 状态码可能非 200，先看状态码。
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("opensdk: http status %d body=%s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("opensdk: http status %d body=%s", resp.StatusCode, truncateForError(respBody))
 	}
 
 	r := &response{}
 	if err = json.Unmarshal(respBody, r); err != nil {
-		return fmt.Errorf("opensdk: 解析响应失败: %w body=%s", err, string(respBody))
+		return fmt.Errorf("opensdk: 解析响应失败: %w body=%s", err, truncateForError(respBody))
 	}
 	if r.ErrCode != 0 {
 		return &APIError{Code: r.ErrCode, Message: r.ErrMsg}
@@ -205,44 +234,61 @@ func (c *Client) call(ctx context.Context, path string, in, out any) error {
 	return json.Unmarshal(r.ResData, out)
 }
 
-// SignParams 按约定的签名串计算签名。
-//
-// 与我方服务端口径一致：把参数按 key 排序后取 value，逐个以 & 连接，
-// 再追加 timestamp、nonce 与 appKey，用 appSecret 做 HMAC-SHA256，输出 hex。
-//
-// 注意：结构体的 nil 指针字段会被跳过（不出现在签名串里），
-// 因此请求体的字段请直接赋值，不要传 nil 指针。
-func (c *Client) SignParams(in any, nonce string) string {
-	params := structToParams(in)
-	return Sign(c.cfg.AppSecret, params, c.cfg.AppKey, nonce)
+// SignParams 将 in JSON 序列化后按指定 path 签名（method 固定为 POST，与 call 一致）。
+// path 须与实际请求路径一致，如 "/open/pay/create"；timestamp 为 Unix 秒字符串。
+func (c *Client) SignParams(path string, in any, nonce, timestamp string) string {
+	body, err := json.Marshal(in)
+	if err != nil {
+		return ""
+	}
+	return SignBody(c.cfg.AppSecret, body, http.MethodPost, path, c.cfg.AppKey, nonce, timestamp)
 }
 
-// Sign 是签名算法的独立实现，回调验签也用它。
+// SignBody 对原始 HTTP body 字节做 HMAC-SHA256（hex）。
 //
-// timestamp 固定按 "0" 参与拼接：我方服务端不校验时间窗（跨国接入方时钟会漂移），
-// 防重放由 nonce 去重与业务幂等兜底。
-func Sign(appSecret string, params map[string]string, appKey, nonce string) string {
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var paramStr string
-	for _, k := range keys {
-		paramStr += params[k] + "&"
-	}
-	paramStr += fmt.Sprintf("%v&%v&%v", "0", nonce, appKey)
+// 待签串（字面量换行分隔）：
+//
+//	v3\n{method}\n{path}\n{timestamp}\n{nonce}\n{appKey}\n{rawBody}
+//
+// method 一般为 "POST"；path 为 URL 路径（不含 query），如 "/open/pay/create"。
+// timestamp 为 Unix 秒（UTC 纪元），须与头 X-Timestamp 一致；服务端校验 ±300 秒。
+// 双方主机应 NTP 校时。防重放另靠 nonce 去重与业务幂等。
+func SignBody(appSecret string, body []byte, method, path, appKey, nonce, timestamp string) string {
+	var b strings.Builder
+	b.Grow(3 + len(method) + len(path) + len(timestamp) + len(nonce) + len(appKey) + len(body) + 6)
+	b.WriteString("v3\n")
+	b.WriteString(method)
+	b.WriteByte('\n')
+	b.WriteString(path)
+	b.WriteByte('\n')
+	b.WriteString(timestamp)
+	b.WriteByte('\n')
+	b.WriteString(nonce)
+	b.WriteByte('\n')
+	b.WriteString(appKey)
+	b.WriteByte('\n')
+	b.Write(body)
 
 	mac := hmac.New(sha256.New, []byte(appSecret))
-	mac.Write([]byte(paramStr))
+	mac.Write([]byte(b.String()))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // VerifyNotice 校验回调签名，供你的服务端在收到我方通知时使用。
 //
-// 传原始 body 字节即可，SDK 会解析 noticeType 与 data 后按回调口径拼接。
-// 回调签名串与请求签名口径不同，见 verifyNoticeSignature。
+// 对原始 Body 按 SignNotice 口径验签（notice\n{appKey}\n{rawBody}），与请求 SignBody 一样
+// 签原始字节；切勿先反序列化再 Marshal。
+//
+// 重要——验签 ≠ 防重放：
+//
+//   - 本方法只验证 HMAC：证明 body 未被篡改，且签名由持有 AppSecret 的一方生成。
+//   - 不校验 data.timestamp 是否过期，也不记录/消费 nonce。
+//   - NoticeRaw 中的 Nonce、Timestamp、AppKey 头字段不参与判断（验签以 Body + Signature 为准，
+//     appKey 使用客户端配置的 AppKey）。
+//   - 同一条合法回调被再次 POST 时，VerifyNotice 仍可能返回 true。
+//
+// 因此你必须在业务层做幂等，例如按 orderNo / refundNo / withdrawNo（或 data.nonce）
+// 去重后再改订单状态、入账；平台未收到 {success:true} 时也会重投，幂等同样必要。
 func (c *Client) VerifyNotice(raw NoticeRaw) bool {
 	return verifyNoticeSignature(c.cfg.AppSecret, c.cfg.AppKey, raw.Body, raw.Signature)
 }
@@ -253,4 +299,11 @@ func newNonce() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+func truncateForError(b []byte) string {
+	if len(b) <= maxErrorBodySnippet {
+		return string(b)
+	}
+	return string(b[:maxErrorBodySnippet]) + "...(truncated)"
 }
