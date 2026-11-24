@@ -12,6 +12,7 @@
 // 本 SDK 只应运行在**你的服务端**：AppSecret 绝不能下发到网页或客户端。
 // 泄漏后可伪造提现/退款等请求并动用应用结算户，详见 README。
 package opensdk
+
 import (
 	"bytes"
 	"context"
@@ -146,7 +147,8 @@ func (c *Client) WithdrawCreate(ctx context.Context, in WithdrawCreateRequest) (
 	return out, c.call(ctx, "/open/withdraw/create", in, out)
 }
 
-// WithdrawQuery 按我方提现单号查询。
+// WithdrawQuery 查询提现（withdrawNo / outOrderNo 二选一；都传时优先 withdrawNo）。
+// 提现当前无回调，超时或对账时用本接口兜底。
 func (c *Client) WithdrawQuery(ctx context.Context, in WithdrawQueryRequest) (*WithdrawResult, error) {
 	out := &WithdrawResult{}
 	return out, c.call(ctx, "/open/withdraw/query", in, out)

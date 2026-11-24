@@ -68,6 +68,8 @@ type PayCreateRequest struct {
 	Openid     string `json:"openid"`
 	OutOrderNo string `json:"outOrderNo"` // 你的业务单号，用于幂等
 	Amount     string `json:"amount"`     // 金额，最多 8 位小数
+	Attach     string `json:"attach"`     // 附加数据，原样透传，支付回调带回，最长 512 字符
+	Channel    string `json:"channel"`    // 渠道，可选，支付回调带回，最长 64 字符
 }
 
 type PayCreateResult struct {
@@ -87,6 +89,7 @@ type PayQueryResult struct {
 	Status      string `json:"status"`
 	Amount      string `json:"amount"`
 	ChainName   string `json:"chainName"`
+	Attach      string `json:"attach"` // 附加数据，下单原样透传
 	CompletedAt string `json:"completedAt"`
 }
 
@@ -157,9 +160,10 @@ type WithdrawCreateRequest struct {
 	Amount     string `json:"amount"`     // 金额，最多 8 位小数
 }
 
-// WithdrawQueryRequest 按我方提现单号查询。
+// WithdrawQueryRequest 查询提现；WithdrawNo 与 OutOrderNo 二选一，都传时优先 WithdrawNo。
 type WithdrawQueryRequest struct {
-	WithdrawNo string `json:"withdrawNo"` // 我方提现单号
+	WithdrawNo string `json:"withdrawNo,omitempty"` // 我方提现单号
+	OutOrderNo string `json:"outOrderNo,omitempty"` // 你的提现单号（超时兜底）
 }
 
 // WithdrawResult 是单笔提现的对外结构，发起与查询共用。
@@ -222,7 +226,7 @@ type NoticePayload struct {
 const (
 	NoticeTypePayment  = "payment"  // 支付结果
 	NoticeTypeRefund   = "refund"   // 退款终态（成功或失败）
-	NoticeTypeWithdraw = "withdraw" // 提现终态（成功或失败）
+	NoticeTypeWithdraw = "withdraw" // 提现终态（兼容保留；当前服务端不发提现回调）
 )
 
 // PaymentNotice 是支付结果回调的 data 段。
@@ -233,6 +237,8 @@ type PaymentNotice struct {
 	Status     string `json:"status"`     // 订单状态：success
 	ChainName  string `json:"chainName"`  // 链路
 	Amount     string `json:"amount"`     // 金额，8 位小数
+	Attach     string `json:"attach"`     // 附加数据，下单原样透传
+	Channel    string `json:"channel"`    // 渠道，下单原样带回
 	Timestamp  string `json:"timestamp"`
 	Nonce      string `json:"nonce"`
 }
@@ -279,7 +285,7 @@ func (p *NoticePayload) Refund() (*RefundNotice, error) {
 	return out, nil
 }
 
-// WithdrawNotice 是提现结果回调的 data 段。
+// WithdrawNotice 是提现结果回调的 data 段（兼容保留；当前服务端不发提现回调，请用 WithdrawCreate / WithdrawQuery）。
 type WithdrawNotice struct {
 	WithdrawNo string `json:"withdrawNo"` // 我方提现单号
 	OutOrderNo string `json:"outOrderNo"` // 你的提现单号
@@ -292,6 +298,7 @@ type WithdrawNotice struct {
 }
 
 // Withdraw 取出提现回调的 data；通知类型不是 withdraw 时返回错误。
+// 当前服务端不发提现回调，此方法仅兼容历史/自测场景。
 func (p *NoticePayload) Withdraw() (*WithdrawNotice, error) {
 	if p.NoticeType != NoticeTypeWithdraw {
 		return nil, fmt.Errorf("opensdk: 通知类型不是 withdraw：%q", p.NoticeType)
@@ -323,7 +330,7 @@ const (
 // 若你自行改写或重新序列化 body，验签会失败。
 //
 // AppKey / Nonce / Timestamp 便于排查或与头字段对照；VerifyNotice 当前只使用 Body 与 Signature
-//（appKey 取自客户端配置）。防重放须自行按业务单号幂等，见 VerifyNotice 文档。
+// （appKey 取自客户端配置）。防重放须自行按业务单号幂等，见 VerifyNotice 文档。
 type NoticeRaw struct {
 	Body      []byte
 	AppKey    string

@@ -81,7 +81,7 @@ func main() {
 	}
 	fmt.Printf("inviteCode=%s\n", invite.InviteCode)
 
-	// 7. 发起提现（应用结算户 → 用户）；结果以回调 noticeType=withdraw 为准，也可用 WithdrawQuery 兜底
+	// 7. 发起提现（应用结算户 → 用户）；当前无回调，以同步返回 status 为准；可用 WithdrawQuery(withdrawNo/outOrderNo) 兜底
 	withdraw, err := client.WithdrawCreate(ctx, opensdk.WithdrawCreateRequest{
 		Openid:     token.Openid,
 		OutOrderNo: "YOUR-WITHDRAW-001",

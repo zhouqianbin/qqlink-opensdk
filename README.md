@@ -93,7 +93,7 @@ func main() {
 | `FriendList` | 查询用户好友（仅返回同样授权了你应用的部分） |
 | `InviteCode` | 按 openid 查询用户邀请码 |
 | `WithdrawCreate` | 发起提现（应用结算户 → 用户） |
-| `WithdrawQuery` | 按我方提现单号查询 |
+| `WithdrawQuery` | 查询提现（`withdrawNo` / `outOrderNo` 二选一） |
 | `ConsumeSync` | 批量同步用户消费记录（消费返佣） |
 
 ### 错误处理
@@ -130,11 +130,13 @@ if err != nil {
 
 下单后，把返回的 `orderInfo` 交给你的**网页**，网页会通过桥接唤起 QQLink App 的支付确认框。
 
+`PayCreate` 可选传 `attach`（最长 512 字符）：平台不解析，支付成功回调与 `PayQuery` 原样带回，便于你关联己方业务数据。也可选传 `channel`（最长 64 字符），支付成功回调原样带回。
+
 ---
 
 ## 接收回调
 
-支付 / 退款 / 提现结果，QQLink 会 `POST` 到你的 `notice_url`。回调分两层：顶层是 `noticeType`，业务字段放在 `data` 里，结构随类型不同。支付结果示例：
+支付 / 退款结果，QQLink 会 `POST` 到你的 `notice_url`。**提现当前不发回调**，以 `WithdrawCreate` 同步返回为准，可用 `WithdrawQuery` 查询兜底。回调分两层：顶层是 `noticeType`，业务字段放在 `data` 里，结构随类型不同。支付结果示例：
 
 **你的服务端必须返回**：
 
@@ -147,13 +149,15 @@ if err != nil {
     "status": "success",
     "chainName": "TRC20",
     "amount": "10.50000000",
+    "attach": "your-biz-extra",
+    "channel": "your-channel",
     "timestamp": "1760851231",
     "nonce": "a1b2c3d4e5f60718"
   }
 }
 ```
 
-`data` 用 `NoticePayload.Payment()` 取；金额是固定 8 位小数的字符串。
+`data` 用 `NoticePayload.Payment()` 取；金额是固定 8 位小数的字符串。`attach` 为下单时传入的附加数据（可选，最长 512 字符），回调与 `PayQuery` 原样带回。`channel` 为下单时传入的渠道（可选，最长 64 字符），回调原样带回。
 
 **你的服务端必须返回**：
 
@@ -172,7 +176,7 @@ if err != nil {
 - 通过 = **原始 body** 未被篡改，且签名由持有 `AppSecret` 的一方生成（待签串 `notice\n{appKey}\n{rawBody}`）。
 - **不**校验 `data.timestamp` 是否过期，**不**消费 `nonce`；同一条合法回调再次 POST 时仍可能验签成功。
 - 请求头里的 `X-Nonce` / `X-Timestamp` / `X-Open-Key` 即使填进 `NoticeRaw` 也不参与判断（以 Body + `X-Signature` 为准；appKey 用客户端配置）。
-- 你必须在业务层幂等：支付按 `orderNo`、退款按 `refundNo`（或 `outRefundNo`）、提现按 `withdrawNo`（或 `outOrderNo`）去重后再改状态/入账。平台未收到 `{success:true}` 时会重投，幂等同样必要。
+- 你必须在业务层幂等：支付按 `orderNo`、退款按 `refundNo`（或 `outRefundNo`）去重后再改状态/入账。平台未收到 `{success:true}` 时会重投，幂等同样必要。
 
 ```go
 func noticeHandler(w http.ResponseWriter, r *http.Request) {
@@ -200,11 +204,7 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			_ = notice.RefundNo
 		}
-	case opensdk.NoticeTypeWithdraw:
-		notice, err := payload.Withdraw()
-		if err == nil {
-			_ = notice.WithdrawNo
-		}
+	// 提现当前不发回调；若历史环境仍收到 withdraw，可按需处理
 	}
 
 	_ = json.NewEncoder(w).Encode(opensdk.AckResponse{Success: true})
@@ -253,32 +253,14 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 
 ## 提现
 
-提现由**你的服务端**发起，`WithdrawCreate`：从你的应用结算户把金额打到指定 `openid` 对应用户（**仅需 `AppSecret`，无用户二次确认**）。成功和失败都会回调，`noticeType` 为 `withdraw`。
+提现由**你的服务端**发起，`WithdrawCreate`：从你的应用结算户把金额打到指定 `openid` 对应用户（**仅需 `AppSecret`，无用户二次确认**）。
+
+**当前不发提现回调。** 以接口同步返回的 `status`（`success` / `failed`）为准；超时或对账时用 `WithdrawQuery` 查询。
 
 - `outOrderNo` 是幂等键：同一提现单号重复提交返回第一次的结果。
 - 超出单笔或当日限额时返回错误码 `30008`。
-- 结算户余额不足时记录落为 `failed`，并通过回调通知。
-- 可用 `WithdrawQuery` 按我方 `withdrawNo` 查询兜底。
-
-```json
-{
-  "noticeType": "withdraw",
-  "data": {
-    "withdrawNo": "W1837...",
-    "outOrderNo": "YOUR-WITHDRAW-001",
-    "status": "success",
-    "chainName": "TRC20",
-    "amount": "5.00000000",
-    "errorMsg": "",
-    "timestamp": "1760851231",
-    "nonce": "a1b2c3d4e5f60718"
-  }
-}
-```
-
-取 data 用 `payload.Withdraw()`；验签仍用原始 body 的 `VerifyNotice`。
-
-请按 `withdrawNo`（或 `outOrderNo`）幂等处理。
+- 结算户余额不足时记录落为 `failed`，看同步返回的 `status` / `errorMsg`。
+- `WithdrawQuery`：`withdrawNo` 与 `outOrderNo` 二选一；都传时优先 `withdrawNo`。超时时可用己方 `outOrderNo` 兜底。
 
 ## 消费同步（返佣）
 
@@ -293,6 +275,7 @@ func noticeHandler(w http.ResponseWriter, r *http.Request) {
 用户身份用 **openid** 表示——它是该用户在你这个应用下的**脱敏标识**。
 
 - 在你应用内唯一；**同一用户在不同应用拿到的 openid 不同**。
+- 用户解除授权后再重新授权，**openid 不变**，可继续用原 openid 关联业务数据。
 - 你**拿不到**用户的内部 uid，也无法枚举。
 - **`AuthToken` 返回的昵称/头像是授权那一刻的快照**；`UserInfo` 返回的是**实时值**。两者时点不同，请按需选择。
 - 认证状态（是否实名）始终是实时的。
